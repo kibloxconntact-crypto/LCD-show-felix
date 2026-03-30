@@ -1,81 +1,136 @@
 #!/bin/bash
-# -------------------------------
-# HDMI + 3.5" SPI Display Setup
-# Pi läuft immer, Mini-Display optional
-# -------------------------------
+# -----------------------------------
+# Raspberry Pi 4B - HDMI + 3.5" SPI Display
+# Dein GitHub Username: kibloxconntact-crypto
+# -----------------------------------
 
-# --- Backup und Ordner ---
-sudo ./system_backup.sh
+# Variablen
+username=$(whoami)
+deb_version=$(lsb_release -sr)
+hardware_arch=$(uname -m | grep -q "64" && echo 64 || echo 32)
 
+# Backup System
+if [ -f ./system_backup.sh ]; then
+    sudo ./system_backup.sh
+fi
+
+# Entferne altes libinput config, falls vorhanden
 if [ -f /etc/X11/xorg.conf.d/40-libinput.conf ]; then
     sudo rm -rf /etc/X11/xorg.conf.d/40-libinput.conf
 fi
 
+# Stelle sicher, dass X11 config Ordner existiert
 if [ ! -d /etc/X11/xorg.conf.d ]; then
     sudo mkdir -p /etc/X11/xorg.conf.d
 fi
 
-# --- Backup config.txt ---
-sudo cp -rf ./boot/config.txt ./boot/config.txt.bak
+# Overlay kopieren
+sudo cp ./usr/tft35a-overlay.dtb /boot/overlays/
+sudo cp ./usr/tft35a-overlay.dtb /boot/overlays/tft35a.dtbo
 
-# --- HDMI Fixes ---
-sudo bash -c 'cat <<EOF >> ./boot/config.txt.bak
-hdmi_force_hotplug=1
-hdmi_group=2
-hdmi_mode=82
-hdmi_drive=2
-EOF'
+# System Konfiguration laden
+if [ -f ./system_config.sh ]; then
+    source ./system_config.sh
+fi
 
-# --- I2C, SPI, UART ---
-sudo bash -c 'cat <<EOF >> ./boot/config.txt.bak
+# Backup config.txt
+sudo cp /boot/config.txt /boot/config.txt.bak
+
+# TFT Overlay + I2C/SPI/UART
+sudo bash -c 'cat >> /boot/config.txt' <<EOL
+dtoverlay=tft35a:rotate=90
 dtparam=i2c_arm=on
 dtparam=spi=on
 enable_uart=1
-EOF'
+hdmi_force_hotplug=1
+hdmi_drive=2
+hdmi_group=2
+hdmi_mode=87
+hdmi_cvt 480 320 60 6 0 0 0
+EOL
 
-# --- TFT Overlay aktivieren ---
-sudo bash -c 'cat <<EOF >> ./boot/config.txt.bak
-dtoverlay=tft35a:rotate=90
-EOF'
-
-# --- Config zurück nach /boot ---
-sudo cp -rf ./boot/config.txt.bak /boot/config.txt
-
-# --- Kalibrierung nur, wenn Display aktiv ---
+# X11 Calibration für TFT
 sudo cp -rf ./usr/99-calibration.conf-35-90 /etc/X11/xorg.conf.d/99-calibration.conf
 
-# --- Optional: Display Toggle Script ---
+# FBCP oder Xorg Config je nach Debian Version
+if [[ "$deb_version" < "12.1" ]]; then
+    sudo cp -rf ./usr/99-fbturbo.conf /usr/share/X11/xorg.conf.d/99-fbturbo.conf
+fi
+
+if [[ "$deb_version" = "13.1" ]] || [[ "$deb_version" > "13.1" ]]; then
+    sudo cp -rf ./usr/99-fbturbo-fbcp.conf /usr/share/X11/xorg.conf.d/99-fbturbo.conf
+    sudo cp -rf ./etc/.bash_profile /home/$username/
+fi
+
+# Inittab ersetzen für alte Versionen
+if [[ "$deb_version" < "13.1" ]]; then
+    sudo cp ./usr/inittab /etc/
+fi
+
+# Markierung, dass Installation durchgeführt wurde
+sudo touch ./.have_installed
+echo "gpio:resistance:35:90:480:320" > ./.have_installed
+
+# Touch Input evdev installieren/aktualisieren
+input_result=0
+version=`uname -v`
+version=${version##*(}
+version=${version%%-*}
+
+if test $version -lt 2017; then
+    echo "reboot needed"
+else
+    wget --spider -q -o /dev/null --tries=1 -T 10 http://mirrors.zju.edu.cn/raspbian/raspbian
+    if [ $? -ne 0 ]; then
+        input_result=1
+    else
+        sudo apt-get install xserver-xorg-input-evdev -y
+        dpkg -l | grep xserver-xorg-input-evdev > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            input_result=1
+        fi
+    fi
+    if [ $input_result -eq 1 ]; then 
+        if [ $hardware_arch -eq 32 ]; then
+            sudo dpkg -i -B ./xserver-xorg-input-evdev_1%3a2.10.6-1+b1_armhf.deb
+        elif [ $hardware_arch -eq 64 ]; then
+            sudo dpkg -i -B ./xserver-xorg-input-evdev_1%3a2.10.6-2_arm64.deb
+        fi
+    fi
+    sudo cp -rf /usr/share/X11/xorg.conf.d/10-evdev.conf /usr/share/X11/xorg.conf.d/45-evdev.conf
+fi
+
+# --- Toggle Script für Mini-Display Sleep ---
 TOGGLE_SCRIPT=~/tft_sleep_toggle.sh
 cat <<'EOL' > $TOGGLE_SCRIPT
 #!/bin/bash
 BL_PIN=18
-# GPIO exportieren
 if [ ! -d /sys/class/gpio/gpio$BL_PIN ]; then
     echo $BL_PIN > /sys/class/gpio/export
     echo out > /sys/class/gpio/gpio$BL_PIN/direction
 fi
-# Status prüfen
 BL_STATUS=$(cat /sys/class/gpio/gpio$BL_PIN/value)
 if [ "$BL_STATUS" -eq 1 ]; then
-    # Display ausschalten
     echo 0 > /sys/class/gpio/gpio$BL_PIN/value
     sudo sh -c 'cat /dev/zero > /dev/fb1'
     echo "Mini-Display in Sleep"
 else
-    # Display einschalten
     echo 1 > /sys/class/gpio/gpio$BL_PIN/value
     echo "Mini-Display aktiv"
 fi
 EOL
-
 chmod +x $TOGGLE_SCRIPT
 
-# --- FBCP überspringen ---
-echo "Framebuffer Copy übersprungen (optional, falls Mini-Display Spiegelung benötigt)"
-
-# --- sync & reboot ---
+# Alles syncen & kurz warten
 sudo sync
 sleep 1
-echo "HDMI + Mini-Display Setup abgeschlossen."
-echo "Pi wird neu gestartet..."
+
+# Rotation optional über Parameter
+if [ $# -eq 1 ]; then
+    sudo ./rotate.sh $1
+elif [ $# -gt 1 ]; then
+    echo "Too many parameters"
+fi
+
+echo "HDMI + Mini-SPI Display Setup abgeschlossen. Rebooting now..."
 sudo reboot
