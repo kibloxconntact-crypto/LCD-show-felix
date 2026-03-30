@@ -1,10 +1,12 @@
-
 #!/bin/bash
+# -------------------------------
+# HDMI + 3.5" SPI Display Setup
+# Pi läuft immer, Mini-Display optional
+# -------------------------------
 
-# Backup vom System
+# --- Backup und Ordner ---
 sudo ./system_backup.sh
 
-# X11 Backup und Ordner sicherstellen
 if [ -f /etc/X11/xorg.conf.d/40-libinput.conf ]; then
     sudo rm -rf /etc/X11/xorg.conf.d/40-libinput.conf
 fi
@@ -13,10 +15,10 @@ if [ ! -d /etc/X11/xorg.conf.d ]; then
     sudo mkdir -p /etc/X11/xorg.conf.d
 fi
 
-# HDMI Settings sichern
+# --- Backup config.txt ---
 sudo cp -rf ./boot/config.txt ./boot/config.txt.bak
 
-# HDMI fixen: Desktop auf HDMI erzwingen
+# --- HDMI Fixes ---
 sudo bash -c 'cat <<EOF >> ./boot/config.txt.bak
 hdmi_force_hotplug=1
 hdmi_group=2
@@ -24,32 +26,56 @@ hdmi_mode=82
 hdmi_drive=2
 EOF'
 
-# I2C, SPI und UART aktivieren
+# --- I2C, SPI, UART ---
 sudo bash -c 'cat <<EOF >> ./boot/config.txt.bak
 dtparam=i2c_arm=on
 dtparam=spi=on
 enable_uart=1
 EOF'
 
-# TFT Overlay auskommentiert, Mini-Display wird NICHT automatisch aktiviert
-# sudo echo "dtoverlay=tft35a:rotate=90" >> ./boot/config.txt.bak
+# --- TFT Overlay aktivieren ---
+sudo bash -c 'cat <<EOF >> ./boot/config.txt.bak
+dtoverlay=tft35a:rotate=90
+EOF'
 
-# Optional: Mini-Display manuell aktivieren
-# sudo ./LCD35-show
-
-# Kopiere die config zurück nach /boot
+# --- Config zurück nach /boot ---
 sudo cp -rf ./boot/config.txt.bak /boot/config.txt
 
-# Calibration nur falls Display wirklich benutzt wird
-# sudo cp -rf ./usr/99-calibration.conf-35-90  /etc/X11/xorg.conf.d/99-calibration.conf
+# --- Kalibrierung nur, wenn Display aktiv ---
+sudo cp -rf ./usr/99-calibration.conf-35-90 /etc/X11/xorg.conf.d/99-calibration.conf
 
-# FBCP (Framebuffer Copy) Installation überspringen, nur nötig, wenn Mini-Display gleichzeitig Spiegelung soll
-# echo "FBCP Installation übersprungen"
+# --- Optional: Display Toggle Script ---
+TOGGLE_SCRIPT=~/tft_sleep_toggle.sh
+cat <<'EOL' > $TOGGLE_SCRIPT
+#!/bin/bash
+BL_PIN=18
+# GPIO exportieren
+if [ ! -d /sys/class/gpio/gpio$BL_PIN ]; then
+    echo $BL_PIN > /sys/class/gpio/export
+    echo out > /sys/class/gpio/gpio$BL_PIN/direction
+fi
+# Status prüfen
+BL_STATUS=$(cat /sys/class/gpio/gpio$BL_PIN/value)
+if [ "$BL_STATUS" -eq 1 ]; then
+    # Display ausschalten
+    echo 0 > /sys/class/gpio/gpio$BL_PIN/value
+    sudo sh -c 'cat /dev/zero > /dev/fb1'
+    echo "Mini-Display in Sleep"
+else
+    # Display einschalten
+    echo 1 > /sys/class/gpio/gpio$BL_PIN/value
+    echo "Mini-Display aktiv"
+fi
+EOL
 
-# sync
+chmod +x $TOGGLE_SCRIPT
+
+# --- FBCP überspringen ---
+echo "Framebuffer Copy übersprungen (optional, falls Mini-Display Spiegelung benötigt)"
+
+# --- sync & reboot ---
 sudo sync
 sleep 1
-
-echo "HDMI Desktop fix applied. Mini-Display optional."
-echo "Starte neu..."
+echo "HDMI + Mini-Display Setup abgeschlossen."
+echo "Pi wird neu gestartet..."
 sudo reboot
